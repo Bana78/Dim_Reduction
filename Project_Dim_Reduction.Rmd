@@ -1,0 +1,1196 @@
+---
+title: "Dimintionality Reduction"
+output: html_notebook
+---
+
+
+
+-------------------------------------------------------------
+**install packages**
+-------------------------------------------------------------
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("scater")
+```
+
+```{r}
+BiocManager::install("SingleCellExperiment")
+BiocManager::install("edgeR")
+devtools::install_github("linxihui/NNLM")
+install.packages("ggplot2")
+
+```
+
+
+
+
+
+**Load Libraries**
+
+
+```{r}
+library(scater)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(Seurat)
+library(RColorBrewer)
+library(scales)
+library(cowplot)
+library(patchwork)
+library(grid)
+library(gridExtra)
+library(harmony)
+library(igraph)
+library(devtools)
+library("BiocManager")
+library(SingleCellExperiment)
+library(edgeR)
+library(Rtsne)
+
+```
+
+
+
+
+```{r}
+suppressPackageStartupMessages({
+    library(SingleCellExperiment)
+    library(BiocParallel)
+    library(psych)
+    library(GPArotation)
+    library(sctransform)
+    library(ica)
+    library(NNLM)
+  })
+
+```
+
+
+**create some functions to carry out a specific task** 
+
+**Params function**
+
+for each dimentionality reduction method extract All requierd parameters:(example, PCA need filtering_method="nonzeros", norm_method="log"), some dimensionality reduction methods (e.g.,Poisson NMF, ZINB-WaVE, pCMF, and DCA) directly model count data.
+
+```{r}
+params_settings <- function(method, num_clust=NULL){
+    
+    if(method=="FA"){
+    #"Oblimin",included The factor correlation matrix shows the strength and direction of relationships between the factors, or factors are not allowed to correlate.
+      params <- list(rotate = "oblimin", filtering_method="nonzeros", norm_method="log")
+    }else if(method=="PCA"){
+      params <- list(filtering_method="nonzeros", norm_method="log")
+    }else if(method=="PoissonNMF"){
+      params <- list(num_core=5, doParallel=TRUE, algorithm="lee", loss="mkl", filtering_method="nonzeros")
+    }else if(method=="NMF"){
+      params <- list(num_core=5, doParallel=TRUE, algorithm="lee", loss="mse", filtering_method="nonzeros", norm_method="log")
+    }else if(method=="ICA"){
+      params <- list(filtering_method="nonzeros", norm_method="log")
+    }else if(method=="pCMF"){
+      params <- list(num_core=20, doParallel=TRUE, filtering_method="nonzeros")
+    }else if(method=="DiffusionMap"){
+      params <- list(filtering_method="nonzeros", norm_method="log")
+    }else if(method=="ZINBWaVE"){
+      params <- list(num_core=20, doParallel=TRUE, X=NULL, V=NULL, filtering_method="nonzeros") 
+   } else if(method=="GLMPCA"){
+      params <- list(filtering_method="nonzeros", fam="nb")
+    }else if(method=="tSNE"){
+      params <- list(filtering_method="nonzeros", norm_method="log", perplexity = 30)
+    }else if(method=="Isomap"){
+      params <- list(filtering_method="nonzeros", norm_method="log", num_prop=0.1)
+    }else if(method=="LLE"){
+      params <- list(filtering_method="nonzeros", norm_method="log", num_prop=0.1)
+    }else if(method=="MSD"){
+      params <- list(filtering_method="nonzeros", norm_method="log", num_prop=0.1)
+    }else if(method=="LLLE"){
+      params <- list(filtering_method="nonzeros", norm_method="log", num_prop=0.1)
+    }else if(method=="LTSA"){
+      params <- list(filtering_method="nonzeros", norm_method="log", num_prop=0.3)
+    }else{
+      stop("no defined method!")
+    }# end fi
+    
+    return(params)
+  }# end function parameter setting
+
+```
+
+
+**params_settings_log cpm transformation**
+
+for each dimentionality reduction method extract All requierd parameters, when using log cpm for normalization(example, PCA need filtering_method="nonzeros", norm_method="lcpm")
+
+```{r}
+params_settings_lcpm <- function(method, num_clust=NULL){
+	
+	if(method=="FA"){
+		params <- list(rotate = "oblimin", filtering_method="nonzeros", norm_method="lcpm")
+	}else if(method=="PCA"){
+		params <- list(filtering_method="nonzeros", norm_method="lcpm")
+	
+	}else if(method=="NMF"){
+		params <- list(num_core=5, doParallel=TRUE, algorithm="lee", loss="mse", filtering_method="nonzeros", norm_method="lcpm")
+	}else if(method=="ICA"){
+		params <- list(filtering_method="nonzeros", norm_method="lcpm")
+	}else if(method=="tSNE"){
+		params <- list(filtering_method="nonzeros", norm_method="lcpm", perplexity = 30)
+	}else{
+		stop("no defined method!")
+	}# end fi
+	
+	return(params)
+}# end function parameter setting
+
+
+```
+
+----------------------------------------------------------------
+**dimintionality reduction methods**
+----------------------------------------------------------------
+
+
+**principal component analysis(PCA)**
+
+
+```{r}
+call_PCA <- function(sce, num_pc, params){
+	## other parameter in PCA method
+	#num_clust <- params$num_clust
+	filtering_method <- params$filtering_method
+	norm_method <- params$norm_method
+	## normalized counts
+	if(norm_method=="log"){
+		norm_counts <- logcounts(sce)
+	}else{
+		norm_counts <- counts(sce)
+	}#end func
+	
+	if(filtering_method=="nonzeros"){
+		#rmoved genes that are expressed in less than five cells
+	  norm_counts <- norm_counts[which(rowSums(norm_counts>0)>5),]
+	  # keeping only the columns that have more than 10 non-zero values.
+		norm_counts <- norm_counts[, which(colSums(norm_counts>0)>10)]
+	}# end fi
+	
+	if(norm_method=="vst"){
+		norm_counts <- VST(norm_counts)
+	}else if(norm_method=="lcpm"){
+		norm_counts <- cpm(norm_counts, log = TRUE,prior.count = 1)
+	}else if(norm_method=="lsd"){
+		norm_counts <- LSD(norm_counts)
+	}else if(norm_method=="seurat"){
+		norm_counts <- SeuratN(norm_counts)
+	}else if(norm_method=="fq"){
+		norm_counts <- FQnorm(norm_counts)
+	}
+	#
+	#rm(sce)
+	tryCatch({
+		ct <- system.time({
+		res_pca <- prcomp(norm_counts, center = TRUE, scale. = FALSE)
+		res_pca <- res_pca$rotation[, seq_len(num_pc), drop = FALSE]
+		})	
+		# count time (computation time)
+		ct <- c(user.self = ct[["user.self"]], sys.self = ct[["sys.self"]], 
+            user.child = ct[["user.child"]], sys.child = ct[["sys.child"]],
+            elapsed = ct[["elapsed"]])
+		list(res = res_pca, ctimes = ct)
+	},
+	error = function(e) {
+    list(res = structure(rep(NA, 1), ctimes = c(user.self = NA, sys.self = NA, user.child = NA, sys.child = NA,
+                elapsed = NA), name_col = colnames(sce)))
+	})
+}# end func
+```
+
+
+
+**factor analysis(FA)**
+
+```{r}
+call_FA <- function(sce, num_pc, params){
+  ## other parameter in FA method
+  rotate <- params$rotate
+  filtering_method <- params$filtering_method
+  
+  norm_method <- params$norm_method
+  ## normalized counts
+  if(norm_method=="log"){
+    norm_counts <- logcounts(sce)
+  }else{
+    norm_counts <- counts(sce)
+  }#end func
+  
+  if(filtering_method=="nonzeros"){
+    norm_counts <- norm_counts[which(rowSums(norm_counts>0)>5),]
+    norm_counts <- norm_counts[, which(colSums(norm_counts>0)>10)]
+  }
+  if(norm_method=="vst"){
+    norm_counts <- VST(norm_counts)
+  }else if(norm_method=="lcpm"){
+    norm_counts <- cpm(norm_counts, log = TRUE,prior.count = 1)
+  }else if(norm_method=="lsd"){
+    norm_counts <- LSD(norm_counts)
+  }else if(norm_method=="seurat"){
+    norm_counts <- SeuratN(norm_counts)
+  }else if(norm_method=="fq"){
+    norm_counts <- FQnorm(norm_counts)
+  }
+  tryCatch({
+    ct <- system.time({
+      res_fa <- fa(r = cor(norm_counts), nfactors = num_pc, rotate = rotate)
+    })	
+    # count time
+    ct <- c(user.self = ct[["user.self"]], sys.self = ct[["sys.self"]], 
+            user.child = ct[["user.child"]], sys.child = ct[["sys.child"]],
+            elapsed = ct[["elapsed"]])
+    list(res = res_fa, ctimes = ct)
+  },
+  error = function(e) {
+    list(res = structure(rep(NA, 1), ctimes = c(user.self = NA, sys.self = NA, user.child = NA, sys.child = NA,
+                                                elapsed = NA), name_col = colnames(sce)))
+  })
+}# end func
+
+```
+
+
+**t-distributed stochastic neighbor embedding(TSNE)**
+
+
+```{r}
+call_tSNE <- function(sce, params){
+    
+    filtering_method <- params$filtering_method
+    norm_method <- params$norm_method
+    ## normalized counts
+    if(norm_method=="log"){
+      norm_counts <- logcounts(sce)
+    }else{
+      norm_counts <- counts(sce)
+    }#end func
+    
+    if(filtering_method=="nonzeros"){
+      norm_counts <- norm_counts[which(rowSums(norm_counts>0)>5),]
+      norm_counts <- norm_counts[, which(colSums(norm_counts>0)>10)]
+    }# end fi
+    if(norm_method=="vst"){
+		  norm_counts <- VST(norm_counts)
+	  }else if(norm_method=="lcpm"){
+		  norm_counts <- cpm(norm_counts, log = TRUE,prior.count = 1)
+	  }else if(norm_method=="lsd"){
+	  	norm_counts <- LSD(norm_counts)
+	  }else if(norm_method=="seurat"){
+		  norm_counts <- SeuratN(norm_counts)
+	  }else if(norm_method=="fq"){
+		  norm_counts <- FQnorm(norm_counts)
+  	}
+    norm_counts <- t(norm_counts)
+   
+    #tsne_result <- Rtsne(norm_counts, dims = 2, perplexity = 30)
+    
+    #return(tsne_result)	
+    tryCatch({
+    ct <- system.time({
+     tsne_result <- Rtsne(norm_counts, dims = 2, perplexity = 30) 
+    })	
+    # count time
+    ct <- c(user.self = ct[["user.self"]], sys.self = ct[["sys.self"]], 
+            user.child = ct[["user.child"]], sys.child = ct[["sys.child"]],
+            elapsed = ct[["elapsed"]])
+    return( list(res = tsne_result, ctimes = ct) )
+  })
+      
+     
+   
+  }
+
+```
+
+
+
+**independent component analysis(ICA)**
+
+
+```{r}
+call_ICA <- function(sce, num_pc, params){
+  # other parameter in FA method
+  rotate <- params$rotate
+  filtering_method <- params$filtering_method
+  norm_method <- params$norm_method
+  ## normalized counts
+  if(norm_method=="log"){
+    norm_counts <- logcounts(sce)
+  }else{
+    norm_counts <- counts(sce)
+  }#end func
+  
+  if(filtering_method=="nonzeros"){
+    norm_counts <- norm_counts[which(rowSums(norm_counts>0)>5),]
+    norm_counts <- norm_counts[, which(colSums(norm_counts>0)>10)]
+  }
+  if(norm_method=="vst"){
+    norm_counts <- VST(norm_counts)
+  }else if(norm_method=="lcpm"){
+    norm_counts <- cpm(norm_counts, log = TRUE,prior.count = 1)
+  }else if(norm_method=="lsd"){
+    norm_counts <- LSD(norm_counts)
+  }else if(norm_method=="seurat"){
+    norm_counts <- SeuratN(norm_counts)
+  }else if(norm_method=="fq"){
+    norm_counts <- FQnorm(norm_counts)
+  }
+  #rm(sce)
+  norm_counts <- t(norm_counts)
+  tryCatch({
+    ct <- system.time({
+      #norm_counts <- selectFeatures_IQR(norm_counts, nb=1000)
+      res_ica <- icafast(norm_counts, num_pc)
+      #res_ica$pca_comp <- res_ica$X %*% res_ica$K
+      res_ica$ica_comp <- res_ica$S
+    })	
+    # count time
+    ct <- c(user.self = ct[["user.self"]], sys.self = ct[["sys.self"]], 
+            user.child = ct[["user.child"]], sys.child = ct[["sys.child"]],
+            elapsed = ct[["elapsed"]])
+    return( list(res = res_ica, ctimes = ct) )
+  },
+  error = function(e) {
+    list(res = structure(rep(NA, 1), ctimes = c(user.self = NA, sys.self = NA, user.child = NA, sys.child = NA,elapsed = NA), name_cell = colnames(sce)))
+  })
+}# end func
+
+```
+
+
+**non-negative matrix factorization(NMF)**
+
+
+```{r}
+call_NMF <- function(sce, num_pc, params){
+  ## other parameter in NMF method
+  filtering_method <- params$filtering_method
+  num_core <- params$num_core
+  norm_method <- params$norm_method
+  ## normalized counts
+  ## normalized counts
+  if(norm_method=="log"){
+    norm_counts <- logcounts(sce)
+  }else{
+    norm_counts <- counts(sce)
+  }#end func
+  
+  if(filtering_method=="nonzeros"){
+    norm_counts <- norm_counts[which(rowSums(norm_counts>0)>5),]
+    #norm_counts <- norm_counts[, which(colSums(norm_counts>0)>0)]
+  }
+  if(norm_method=="vst"){
+    norm_counts <- VST(norm_counts)
+  }else if(norm_method=="lcpm"){
+    norm_counts <- cpm(norm_counts, log = TRUE,prior.count = 1)
+  }else if(norm_method=="lsd"){# unuseful in this case
+    norm_counts <- LSD(norm_counts)
+  }else if(norm_method=="seurat"){
+    norm_counts <- SeuratN(norm_counts)
+  }else if(norm_method=="fq"){
+    norm_counts <- FQnorm(norm_counts)
+  }
+  ##
+  norm_counts <- t(norm_counts)
+  tryCatch({
+    ct <- system.time({
+      res_nmf <- nnmf(norm_counts, num_pc, method = "lee",loss = "mse", n.threads = num_core)
+    })	
+    # count time
+    ct <- c(user.self = ct[["user.self"]], sys.self = ct[["sys.self"]], 
+            user.child = ct[["user.child"]], sys.child = ct[["sys.child"]],
+            elapsed = ct[["elapsed"]])
+    list(res = res_nmf, ctimes = ct)
+  },
+  error = function(e) {
+    list(res = structure(rep(NA, 1), ctimes = c(user.self = NA, sys.self = NA, user.child = NA, sys.child = NA, elapsed = NA), name_col = colnames(sce)))
+  })
+}# end func
+
+```
+
+
+**Poisson NMF**
+
+
+```{r}
+call_PoissonNMF <- function(sce, num_pc, params){
+  ## other parameter in NMF method
+  filtering_method <- params$filtering_method
+  num_core <- params$num_core
+  
+  ## normalized counts
+  counts <- counts(sce)
+  
+  if(filtering_method=="nonzeros"){
+    counts <- counts[which(rowSums(counts>0)>5),]
+    counts <- counts[, which(colSums(counts>0)>10)]
+  }
+  counts <- t(counts)
+  tryCatch({
+    ct <- system.time({
+      res_nmf <- nnmf(counts, num_pc, method = "lee",loss = "mkl",n.threads = num_core)
+    })	
+    # count time
+    ct <- c(user.self = ct[["user.self"]], sys.self = ct[["sys.self"]], 
+            user.child = ct[["user.child"]], sys.child = ct[["sys.child"]],
+            elapsed = ct[["elapsed"]])
+    list(res = res_nmf, ctimes = ct)
+  },
+  error = function(e) {
+    list(res = structure(rep(NA, 1), ctimes = c(user.self = NA, sys.self = NA, user.child = NA, sys.child = NA, elapsed = NA), name_col = colnames(sce)))
+  })
+}# end func
+```
+
+
+**Extract w**
+
+to extract component after applying reduction method(xapmle; when uing PCA w= pca component ;pca1,pca2,...etc)
+
+```{r}
+ExtractW <- function(res, method){
+  if(method %in% c("PCA", "MDS","DiffusionMap","tSNE")){
+    W = res$res
+  }else if (method == "FA"){
+    W = res$res$loadings[, 1:ncol(res$res$loadings)]
+  }else if(method %in% c("ZIFA","scScope","DCA","umap","scvis")){
+    W = res
+  }else if (method %in% c("PoissonNMF", "NMF")){
+    W = res$res$W
+  }else if(method == "pCMF"){
+    W = res$res$factor$U
+  }else if(method == "ZINBWaVE"){
+    W = reducedDim(res$res)
+  }else if (method == "ICA"){
+    W = res$res$ica_comp
+  }else if (method %in% c("GLMPCA")){
+    W = res$res$factors
+  }else if (method %in% c("Isomap", "LLE", "LTSA")){
+    W = res$res$Y
+  }
+  # end 
+  return(W)
+}
+
+```
+
+
+**clustring using the k-means and hierarchical clustering algorithm**
+
+
+```{r}
+ClusteringCells <- function(W, num_clust, method='all'){
+  set.seed(0)
+  res <- list()
+  if(method=="kmeans"){
+    res[[1]] <- kmeans(W, num_clust, nstart=1000, iter.max=100000)$cluster
+    names(res) <- "kmeans"
+    return(res)
+  }else if(method=="gmm"){#Gaussian mixture model, GMM
+    library(mclust)
+    res[[1]] <- MUDAN::getComMembership(W, k=num_clust, method=igraph::cluster_infomap,verbose=FALSE)
+    names(res) <- "commdetec"
+    return(res)
+  }else if(method=="hclust"){
+    library(dynamicTreeCut)
+    W <- scale(W)
+    d <- as.dist(1-cor(t(W)))
+    hc <- hclust(d, method='ward.D')
+    res[[1]] <- cutree(hc, num_clust)
+    names(res) <- "hclust"
+    return(res)
+  }else if(method=="all"){
+    res[[1]] = kmeans(W, num_clust, nstart=1000, iter.max=100000)$cluster
+    library(dynamicTreeCut)
+    W <- scale(W)
+    d <- as.dist(1-cor(t(W)))
+    hc <- hclust(d, method='ward.D')
+    res[[2]] <- cutree(hc, num_clust)
+    
+    names(res) <- c("kmeans","hclust")
+    return(res)
+  }# end fi
+}# end function
+```
+
+
+
+
+**SingleCellExperiment Data**
+------------------------------------------------------------------------
+
+The SingleCellExperiment class is a container for storing and manipulating single-cell genomics data.It is a part of the Bioconductor project in R, specifically designed for the analysis and representation of single-cell RNA-seq data. This class implements a data structure that stores all aspects of our single-cell data - gene-by-cell expression data, per-cell metadata and per-gene annotation and manipulate them in a synchronized manner.
+
+
+
+
+```{r, out.width='80%'}
+knitr::include_graphics("C:/Users/Lina/Desktop/scda/SingleCellExperiment.png")
+
+```
+
+
+
+Each row of the assays corresponds to a row of the rowData (pink shading), while each column of the assays corresponds to a column of the colData and reducedDims (yellow shading). details in in https://bioconductor.org/packages/release/bioc/vignettes/SingleCellExperiment/inst/doc/intro.html;https://bioconductor.org/books/3.14/OSCA.intro/the-singlecellexperiment-class.html
+
+
+
+----------------------------------------------------------------
+**loading data**
+----------------------------------------------------------------
+ScRNA-seq data generated from UMI-based technologies(Baron,Zhengmix4eq)
+and non-UMI-based techniques(Darmanis)
+
+Zhengmix4eq: The data set consists of four pre-sorted cell types (B-cells, naive cytotoxic T-cells, CD14 monocytes, regulatory T-cells) that were combined with equal proportions, with 1,000 cells per cell type [2]. The data were sequenced by 10x Genomics
+Darmanis:single cell RNA sequencing on 466 cells to capture the cellular complexity of the adult and fetal human brain, This data set originally contains 10 distinct cell groups. Clusters 1-8 consist of adult brain cells, whereas cluster 9 and 10 consist of fetal brain cells.
+
+```{r}
+#This data set characterized pancreatic cells from human donors
+Baron <- readRDS(paste0('C:/Users/Lina/Documents/project/sce_Baron.rds') )
+Zhengmix4eq <- readRDS(paste0('C:/Users/Lina/Documents/project/sce_full_Zhengmix4eq.rds') )
+Darmanis <- readRDS(paste0('C:/Users/Lina/Documents/project/sce_full_Darmanis.rds') )
+```
+
+
+```{r}
+Baron
+```
+
+
+
+
+
+```{r}
+head(data.frame(logcounts(Baron)),5)
+print(dim(logcounts(Baron)))
+
+```
+
+
+
+```{r}
+names(colData(Baron))
+```
+
+
+
+
+```{r}
+# need to manually insert the matrix into the assays,create a new assay where we add 100 to all the counts:
+counts_100 <- counts(Baron) + 100
+assay(Baron, "counts_100") <- counts_100 # assign a new entry to assays slot
+assays(Baron) # new assay has now been added.
+
+```
+
+
+
+
+
+
+```{r}
+# Only keeping the first two assays
+assays(Baron) <- assays(Baron)[1:2]
+Baron
+
+```
+
+
+
+
+
+
+```{r}
+Zhengmix4eq
+```
+
+
+
+
+
+
+
+
+
+```{r}
+Darmanis
+```
+
+
+
+
+**Performance of dimensionality reduction methods for cell clustering**
+
+The performance of different DR methods ("PCA","FA","ICA","tSNE","NMF","PoissonNMF") based on k-means and hierarchical clustering is measured by average normalized mutual information (NMI; A) and average adjusted rand index (ARI; B),across(Baron,Darmanis)dataets, for comparing the true cell labels and inferred cell label.All data normalized using log2 Count transformation for the DR method needed normalization. i compared the 3 different number of low-dimensional data. the number is equal to (0.5%, 1%, 3% )of the total number of cells,For each data set with more than 300 cells.
+
+```{r}
+data=list(Baron,Darmanis)
+nmi_Km=0
+nmi_hcl=0
+ari_hcl=0 
+ari_Km=0
+Dim_Reduction=function(method,num){
+  params <- params_settings(method)
+  for (i in 1:length(data)){
+    true_label=as.integer(as.factor(data[[i]]$phenoid))
+    num_red=as.integer(length(colnames(data[[i]]))*num)
+    if (method=="tSNE"){
+      res_method =call_tSNE(data[[i]],params=params)
+      w=res_method$res$Y
+    }
+    else{
+      
+      res_method <- get(paste0("call_",method))(sce=data[[i]], num_pc=num_red, params=params)
+      w=ExtractW(res_method,method)
+    }
+    cluster=ClusteringCells(w,length(unique(true_label)))  
+    nmi_Km <- compare(cluster$kmeans,true_label, method = "nmi")
+    nmi_Km=nmi_Km+nmi_Km
+    ari_Km <- compare(cluster$kmeans,true_label, method = "adjusted.rand")
+    ari_Km=ari_Km+ari_Km
+    nmi_hcl <- compare(cluster$hclust,true_label, method = "nmi")
+    nmi_hcl=nmi_hcl+nmi_hcl
+    ari_hcl <- compare(cluster$hclust,true_label, method = "adjusted.rand")
+    ari_hcl=ari_hcl+ari_hcl
+    }
+  res <- c(nmi_Km/i, ari_Km/i,nmi_hcl/i, ari_hcl/i)
+  names(res) <- c("nmi_Km", "ari_Km","nmi_hcl", "ari_hcl")
+  return(res)
+}
+```
+
+
+
+```{r}
+#main algorithm
+
+method=c("PCA","FA","ICA","tSNE","NMF","PoissonNMF")
+dimintion=c(0.005,0.01,0.03)
+nmiKm_value <- data.frame(matrix(ncol = length(method), nrow = length(dimintion)))
+colnames(nmiKm_value) <- method
+rownames(nmiKm_value) <- dimintion
+ariKm_value <- data.frame(matrix(ncol = length(method), nrow = length(dimintion)))
+colnames(ariKm_value) <- method
+rownames(ariKm_value) <- dimintion
+nmihcl_value <- data.frame(matrix(ncol = length(method), nrow = length(dimintion)))
+colnames(nmihcl_value) <- method
+rownames(nmihcl_value) <- dimintion
+arihcl_value <- data.frame(matrix(ncol = length(method), nrow = length(dimintion)))
+colnames(arihcl_value) <- method
+rownames(arihcl_value) <- dimintion
+
+
+for(i in 1 :length(dimintion)){
+  for (j in 1: length(method) ){
+    value=Dim_Reduction(method[j],dimintion[i])
+    nmiKm_value[i,j]= value[1]
+    ariKm_value[i,j]=value[2]
+    nmihcl_value[i,j]=value[3]
+    arihcl_value[i,j]=value[4]
+  }
+}
+datalist=list(NMIKm=nmiKm_value,ARIkm=ariKm_value,
+              NMIhcl=nmihcl_value,ARIhcl=arihcl_value)  
+```
+
+
+
+
+
+```{r}
+#bar plot for the average NMI across all data sets and across all methods for using kmean and  hierarchical clustering
+bar_plot=list()
+for (i in 1:length(datalist)){
+
+data=datalist[[i]]
+data$threshold <- c("0.5%","1%","3%")
+
+rownames(data) <- NULL
+
+nmi_long <- pivot_longer(data,cols = colnames(data[,-ncol(data)]), 
+                         names_to = "method", 
+                         values_to = "value")
+p=ggplot(nmi_long, aes(x = threshold, y = value, fill = method)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  #geom_text(aes(label = value), vjust = -0.5) +
+  labs(title = "Values by Method and Threshold", 
+       x = "Threshold", 
+       y = names(datalist)[i]) +
+  theme_minimal()
+bar_plot <- append(bar_plot,list(p) )
+}
+
+bar_plot[[1]]/bar_plot[[2]]
+  
+bar_plot[[3]]/bar_plot[[4]]
+```
+
+
+
+
+
+
+
+
+
+**Normalization does not influence the performance of dimensionality reduction methods**
+
+The average performance of different DR methods ("PCA","FA","ICA","tSNE","NMF") based on k-means clustering.The performance is measured by average normalized mutual information (NMI; A), for (Baron,Darmanis)dataets,using log2 cpm transformation.For each data set,i compared the 3 different number of low-dimensional data(0.5%, 1%, 3% on x-axis)
+
+```{r}
+data=list(Baron,Darmanis)
+nmi_Km=0
+nmi_hcl=0
+
+Normalization_lcpm=function(method,num){
+  params <- params_settings_lcpm(method)
+  for (i in 1:length(data)){
+    true_label=as.integer(as.factor(data[[i]]$phenoid))
+    num_red=as.integer(length(colnames(data[[i]]))*num)
+    if (method=="tSNE"){
+      res_method =call_tSNE(data[[i]],params=params)
+      w=res_method$res$Y
+    }
+    else{
+      
+      res_method <- get(paste0("call_",method))(sce=data[[i]], num_pc=num_red, params=params)
+      w=ExtractW(res_method,method)
+    }
+    cluster=ClusteringCells(w,length(unique(true_label)))  
+    nmi_Km <- compare(cluster$kmeans,true_label, method = "nmi")
+    nmi_Km=nmi_Km+nmi_Km
+    
+    nmi_hcl <- compare(cluster$hclust,true_label, method = "nmi")
+    nmi_hcl=nmi_hcl+nmi_hcl
+    
+    }
+  res <- c(nmi_Km/i, nmi_hcl/i)
+  names(res) <- c("nmi_Km","nmi_hcl")
+  return(res)
+}
+```
+
+
+
+
+```{r}
+#main algorithm
+#execlude Poisson NMF) directly model count data
+method=c("PCA","FA","ICA","tSNE","NMF")
+dimintion=c(0.005,0.01,0.03)
+nmiKm <- data.frame(matrix(ncol = length(method), nrow = length(dimintion)))
+colnames(nmiKm) <- method
+rownames(nmiKm) <- dimintion
+
+nmihcl <- data.frame(matrix(ncol = length(method), nrow = length(dimintion)))
+colnames(nmihcl) <- method
+rownames(nmihcl) <- dimintion
+
+
+
+for(i in 1 :length(dimintion)){
+  for (j in 1: length(method) ){
+    score=Normalization_lcpm(method[j],dimintion[i])
+    nmiKm[i,j]= score[1]
+   
+    nmihcl[i,j]=score[2]
+   
+  }
+}
+scorelist=list(KM=nmiKm, hcl=nmihcl)  
+
+```
+
+
+
+
+```{r}
+#bar plot for log cpm
+bar_list=list()
+for (i in 1:length(scorelist)){
+
+data=scorelist[[i]]
+data$threshold <- c("0.5%","1%","3%")
+
+rownames(data) <- NULL
+
+nmi_long <- pivot_longer(data,cols = colnames(data[,-ncol(data)]), 
+                         names_to = "method", 
+                         values_to = "value")
+p=ggplot(nmi_long, aes(x = threshold, y = value, fill = method)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(title = "Values by Method and Threshold", 
+       x = "Threshold", 
+       y = names(scorelist)[i]) +
+  theme_minimal()
+bar_list <- append(bar_list,list(p) )
+#print(p)
+}
+print(bar_list[[1]]/bar_list[[2]])
+```
+
+
+
+
+
+
+
+**Performance of dimensionality reduction methods in UMI vs non-UMI-based data sets**
+
+The performance is measured by NMI for DR methods ("PCA","FA","ICA","tSNE","NMF","PoissonNMF") across UMI-based data (Baron) and nonUMI-based data (Darmanis).i used log2 count transformation for the DR method reuered normalization. For each data set,i compared the 3 different number of low-dimensional data(0.5%, 1%, 3% on x-axis)of the total number of cells
+
+```{r}
+method=c("PCA","FA","ICA","tSNE","NMF","PoissonNMF")
+dimintion=c(0.005,0.01,0.03)
+nmi_value <- data.frame(matrix(ncol = length(method), nrow = length(dimintion)))
+colnames(nmi_value) <- method
+rownames(nmi_value) <- dimintion
+
+UMIvsnonUMI=function(data){
+  true_label=as.integer(as.factor(data$phenoid))
+  for(i in 1 :length(dimintion)){
+     num_red=as.integer(length(colnames(data))*dimintion[[i]])
+     for (j in 1: length(method) ){
+      params <- params_settings(method[j])
+      if (method[j] == "tSNE"){
+        res_method =call_tSNE(data,params=params)
+        w=res_method$res$Y
+     }else{
+        res_method <- get(paste0("call_",method[j]))(sce=data, num_pc=num_red, params=params)
+        w=ExtractW(res_method,method[j])
+     }
+      
+      cluster=ClusteringCells(w,length(unique(data$phenoid)),method="kmeans")
+      nmi_value[i,j] <- compare(cluster$kmeans,true_label, method = "nmi")
+   
+     }
+  }
+ return(nmi_value)
+ 
+}
+```
+
+
+
+
+```{r}
+data=list(Baron,Darmanis)
+my_list=list()
+for (d in 1:length(data)){
+  nmi= UMIvsnonUMI(data[[d]]) 
+  nmi$threshold <-c("0.5%","1%","3%")
+  rownames(nmi) <- NULL
+  
+  nmi_long <- pivot_longer(nmi, 
+                           cols = colnames(nmi[,-ncol(nmi)]), 
+                           names_to = "method", 
+                           values_to = "nmi")
+  
+  p=ggplot(nmi_long, aes(x = threshold , y = nmi, fill = method)) +
+    geom_bar(stat = "identity", position = position_dodge()) +
+    labs(title = "NMI Values For UMI and non-UMI data", 
+         x = "Threshold", 
+         y = "NMI") +
+    theme_minimal()
+  my_list <- append(my_list,list(p) )
+}
+
+do.call(grid.arrange, c(my_list, nrow = 2))
+
+```
+
+
+
+
+
+
+**Visualization of clustering results**
+
+visualized the cell clustering results.using log2 count transformation for the DR method needed normalization.i applyed ("PCA","FA","ICA","tSNE","NMF","PoissonNMF") DR methods to extract low-dimensional components for(Zhengmix4eq UMI-based data,low low-number=19, 4 cell types and Darmanis with high low-number=12 non-UMI-based data) have 8 cell types. Then applied tSNE method to extract the two tSNE components for visualization the clusters 
+
+```{r}
+visulisation=function(data,num_red){
+  my_plot <- list()
+  method=c("PCA","FA","ICA","tSNE","NMF","PoissonNMF")
+  for (i in 1: length(method) ){
+     params <- params_settings(method[i])
+     if (method[i] == "tSNE"){
+       res_method =call_tSNE(sce=data,params=params)
+       tsne_result=ExtractW(res_method,method[i])
+     }else{
+       res_method <- get(paste0("call_",method[i]))(sce=data, num_pc=num_red, params=params)
+       w=ExtractW(res_method,method[i])
+       tsne_result <- Rtsne(w, dims = 2) }
+     tsne_coords <- as.data.frame(tsne_result$Y)
+     tsne_coords$V1 <- tsne_result$Y[,1]  # First component on the X-axis
+     tsne_coords$V2 <- tsne_result$Y[,2]  # Second component on the Y-axis
+     tsne_coords$cell_type <-colData(data)$phenoid
+     
+     p=ggplot(tsne_coords, aes(x = V1, y = V2, color = cell_type)) +
+       geom_point() +
+       labs(title = method[i],x = "tSNE-1", y = "tSNE-2") +
+       theme_minimal()
+     my_plot[[i]] <- p 
+     
+   }
+  return(my_plot)
+}
+
+```
+
+
+
+
+
+
+tSNE visualization results are not always consistent with clustering performance for different DR methods
+```{r}
+
+my_dict <- list(
+  key1 = list(n=Darmanis,num=12),
+  key2 = list(n=Zhengmix4eq,num=19))
+
+output <- list()
+
+# Loop over each item in my_dict to generate plots
+for (id in 1:length(my_dict)) {
+  result <- visulisation(my_dict[[id]]$n, my_dict[[id]]$num)
+  output[[id]] <- result  # Store the list of plots for each dataset
+}
+
+# Display the plots for each dataset in 3 rows (use grid.arrange)
+# For the first dataset
+grid.arrange(grobs = output[[1]], nrow = 3)
+
+
+```
+
+
+```{r}
+# For the second dataset
+grid.arrange(grobs = output[[2]], nrow = 3)
+```
+
+
+
+
+
+**Stability analysis across data splits**
+
+to check the effectiveness of DR methods with respect to reduced sample size in the subset.randomly split the Baron data into two subsets with an equal number of cells for each cell type in the two subsets,i compared 3 DR methods"PCA","FA","PoissonNMF.i applied each DR method to each subset separately to obtain clustering results. Performance is measured by normalized mutual index (NMI) after k-means clustering. For each data set, compared the 2 different number of low-dimensional data (%0.5, %1,and %3) from cells. repeated the procedure 4 times 
+
+
+```{r}
+cell_types=colData(Baron)$phenoid
+df=data.frame(cell_id = colnames(Baron), cell_type = cell_types)
+df
+```
+
+
+
+
+```{r}
+
+
+set1=list()
+set2=list()
+#Let's say df has 10 rows (cells). Using sample_frac(1) would randomize the rows, but all 10 rows would still be included in the output:If you wanted to shuffle but only keep 80% of the rows, you would use sample_frac(0.8).
+
+for (i in 1:4){
+ split_cells <- df %>%
+   group_by(cell_type) %>%
+   sample_frac(1) %>%  # Randomly shuffle the cells within each cell type
+   
+   # Assign groups 1 and 2, ensuring balance,repeats the numbers 1 and 2 to match the total number of rows in the group. This results in a new column group being added to your data frame "split_cells" that randomly assigns each cell into one of two groups.
+   mutate(group = rep(1:2, length.out = n())) 
+   
+   #  Create two SCE objects based on the split groups
+ group_1_cells <- split_cells$cell_id[split_cells$group == 1]#extracting the cell_id values for group 1.
+ group_2_cells <- split_cells$cell_id[split_cells$group == 2]#extracting the cell_id values for group 2
+
+# Subset the original SCE object for each group,subsets Baron to include only 
+ sc1 <- Baron[, group_1_cells]#cells whose IDs are in group_1_cells.
+ sc2 <- Baron[, group_2_cells]#cells whose IDs are in group_2_cells.
+ set1=append(set1,list(sc1))
+ set2=append(set2,list(sc2))
+ 
+
+}   
+
+```
+
+```{r}
+split_cells
+```
+
+
+
+```{r}
+method=c("PCA","FA","PoissonNMF")
+dimintion=c(0.005,0.01,0.03)
+grop_pca=data.frame(matrix(ncol = length(dimintion), nrow = length(set1)))
+grop_nmf=data.frame(matrix(ncol = length(dimintion), nrow = length(set1)))
+grop_fa=data.frame(matrix(ncol = length(dimintion), nrow = length(set1)))
+
+# calculate performance for kmean clustring for each subset after apply DR method with number of low-dimensional(%0.5 and %3) from cells 
+accuracy_fc=function(set){
+ for (i in 1:length(set)) {
+    true_label=as.integer(as.factor(set[[i]]$phenoid))
+    for(j in 1 :length(method)){
+      params <- params_settings(method[j])
+     for (z in 1: length(dimintion) ){
+        num_red=as.integer(length(colnames(set[[i]]))*dimintion[[z]])
+        res_method <-get(paste0("call_",method[j]))(sce=set[[i]],num_pc=num_red,params=params)
+        w=ExtractW(res_method,method[j])
+        cluster=ClusteringCells(w,length(unique(set[[i]]$phenoid)),method="kmeans")
+        if (method[j]=="PCA"){
+          grop_pca[i,z]=compare(cluster$kmeans,true_label, method = "nmi")
+        }else if (method[j]=="FA"){
+          grop_fa[i,z]=compare(cluster$kmeans,true_label, method = "nmi")
+        }
+        else if (method[j]=="PoissonNMF"){
+          grop_nmf[i,z]=compare(cluster$kmeans,true_label, method = "nmi")
+        }
+        
+        }
+   
+  
+   
+     }
+  }
+ result <- list(grop_pca = grop_pca, grop_fa=grop_fa, grop_nmf = grop_nmf)
+ return(result)
+  }
+
+
+```
+
+```{r}
+
+group1=accuracy_fc(set1)
+group2=accuracy_fc(set2)
+
+#dataframe contain  accurecy result from 2 subset of Baron data after apply DR-method(PA,FA,PoissonNMF )
+PCA=list(group1$grop_pca,group2$grop_pca)
+PoissonNMF=list(group1$grop_nmf,group2$grop_nmf)
+FA=list(group1$grop_fa,group2$grop_fa)
+
+```
+
+
+
+
+
+
+
+
+visualized the clustering performance of different dimensionality reduction methods in the two subsets separately
+
+```{r}
+#plot boxplot
+boxplot_fc=function(group){
+  
+  df1 <- group[[1]]
+  colnames(df1)=c("%0.5","%1","%3")
+  df2 <- group[[2]]
+  colnames(df2)=c("%0.5","%1","%3")
+#change format df to new format with one column_name variable contaian all col_ames in df and col_names value contain all value fi df
+  df1_long <- df1 %>%
+   pivot_longer(cols = c(colnames(df1)), names_to = "Variable", values_to = "Value") %>%
+   mutate(Dataset = "df1")  # Add a column for the dataset name
+
+  df2_long <- df2 %>%
+   pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value") %>%
+   mutate(Dataset = "df2")  # Add a column for the dataset name
+
+# Combine both datasets for plotting col_name the same
+  df_combined <- bind_rows(df1_long, df2_long)
+
+# Create the boxplot with ggplot2
+  plot_title <- deparse(substitute(group))
+  ggplot(df_combined, aes(x = Variable, y = Value, fill = Dataset)) +
+   geom_boxplot(position = position_dodge(width = 0.8)) +  # Position the boxes side by side
+   labs(title = plot_title, x = "Variable", y = "Values") +
+   scale_fill_manual(values = c("lightblue", "lightgreen")) +  # Custom colors for df1 and df2
+   theme_minimal() +  # Minimal theme
+   theme(axis.text.x = element_text(angle = 0, hjust = 0.5))  # Adjust x-axis labels for better readability
+}
+```
+
+```{r}
+p1=boxplot_fc(PCA)
+p2=boxplot_fc(FA)
+p3=boxplot_fc(PoissonNMF)
+grid.arrange(p1, p2, p3, ncol = 1, heights = c(1000,1000,1000))
+#PCA, FA, accurate and stable performance for 2 subset in small and larg low_dimintionality component 
+```
+
+
+
+
+
+**Time Computation**
+
+examined how computation time for different dimensionality reduction methods ("PCA","FA","ICA","NMF","tSNE","PoissonNMF") varies with respect to the number of low dimensional components extracted (9,18,56), for Baron dataset.using log2 count for the DR method needed normalization
+
+```{r}
+method=c("PCA","FA","ICA","NMF","tSNE","PoissonNMF")
+dimintion=c(9,18,56)
+time_value <- data.frame(matrix(ncol = length(method), nrow = length(dimintion)))
+colnames(time_value) <- method
+rownames(time_value) <- dimintion
+
+for(i in 1 :length(dimintion)){
+   for (j in 1: length(method) ){
+      params <- params_settings(method[j])
+      if (method[j]=="tSNE"){
+        RES =call_tSNE(Baron,params=params)
+      }else{
+        RES <- get(paste0("call_",method[j]))(sce=Baron, num_pc=dimintion[i], params=params)
+ 
+        }
+      time_value[i,j]=round((RES$ ctimes)["user.self"]/3600,2)
+        
+      }
+   }
+
+
+```
+
+
+
+```{r}
+
+
+time_value$threshold <-c("0.5%","1%","3%")
+rownames(time_value) <- NULL
+  
+time_long <- pivot_longer(time_value, 
+                           cols = colnames(time_value[,-ncol(time_value)]), 
+                           names_to = "method", 
+                           values_to = "time_value")
+# Plot
+ggplot(time_long, aes(x = threshold, y = time_value, group = method, color = method)) +
+    geom_line() +
+    geom_point() + # Add points for clarity
+    labs(title = "Line Plot of Times by Method",
+         x = "Threshold",
+         y = "Time Value in Hour") +
+    theme_minimal()
+
+#poission nmf become noticeably computationally more expensive than the remaining methods with increasing number of low-dimensional components
+```
+
+
+
